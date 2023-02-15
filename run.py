@@ -1,11 +1,10 @@
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from argparse import ArgumentParser
 from datetime import datetime, timezone
-from typing import Union
 
 import docker
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, filters
 from telegram.helpers import escape_markdown
 from telegram.constants import ParseMode
@@ -13,9 +12,12 @@ from telegram.constants import ParseMode
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
+as_logger = logging.getLogger('apscheduler')
+as_logger.setLevel(logging.WARNING)
+field_names = lambda DC: ', '.join(f.name for f in fields(DC))
 
 
-class FileData:
+class FileDataType:
 
     def __init__(self, mode='r', type=str):
         self.mode = mode
@@ -60,6 +62,11 @@ class RestartArgs:
         self.timeout = int(self.timeout)
 
 
+@dataclass
+class EchoArgs:
+    text: str = None
+
+
 class ArgsHandler(CommandHandler):
 
     def __init__(self, command, callback, args_class, **kwargs):
@@ -91,7 +98,7 @@ def reply_fabric(message, text) -> str:
     header = '_command_ ' + '`' + message.text + '`'
     body = '\n\n'
     body += escape_markdown(text, version=2)
-    body += '\n'
+    body += '\n' if text.endswith('\n') else '\n\n'
     footer = '_replied_ ' + '`' + now + '`'
 
     reply = header + body + footer
@@ -100,6 +107,12 @@ def reply_fabric(message, text) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id, text="Started")
+
+
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE, args: EchoArgs, docker_client):
+    reply = reply_fabric(update.message, 'echo' if args.text is None else args.text)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=reply,
+                                   parse_mode=ParseMode.MARKDOWN_V2)
 
 
 async def user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -137,23 +150,37 @@ async def restart_container(update: Update, context: ContextTypes.DEFAULT_TYPE,
     
     c.restart(timeout=args.timeout)
 
-    reply = reply_fabric(update.message, 'restarted\n')
+    reply = reply_fabric(update.message, 'restarted')
     await context.bot.send_message(chat_id=update.effective_chat.id, text=reply,
                                    parse_mode=ParseMode.MARKDOWN_V2)
 
 
+async def set_commands(context):
+    await context.bot.set_my_commands(context.job.data)
+    cmd_names = ', '.join(c[0] for c in context.job.data)
+    logging.info('Commands have been set: %s', cmd_names)
+
+
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument('token', type=FileData(), help='Absolute path to a text file with a bot token in.')
-    parser.add_argument('userid', type=FileData(type=int), help='Absolute path to a text file with an allowed user id number.')
+    parser.add_argument('token', type=FileDataType(), help='Absolute path to a text file with a bot token in.')
+    parser.add_argument('userid', type=FileDataType(type=int), help='Absolute path to a text file with an allowed user id number.')
     args = parser.parse_args()
     
     application = ApplicationBuilder().token(args.token).build()
     # application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('info', user_info))
+    # application.add_handler(CommandHandler('info', user_info))
     application.add_handlers([
+        ArgsHandler('echo', echo, EchoArgs, filters=filters.User(user_id=args.userid)),
         ArgsHandler('list', list_containers, ListArgs, filters=filters.User(user_id=args.userid)),
         ArgsHandler('logs', get_container_logs, LogArgs, filters=filters.User(user_id=args.userid)),
         ArgsHandler('restart', restart_container, RestartArgs, filters=filters.User(user_id=args.userid))
     ])
+    commands = (
+        ('echo', f'Resend you typed text or echoing. Params: {field_names(EchoArgs)}'),
+        ('list', f'List containers. Params: {field_names(ListArgs)}'),
+        ('logs', f'Return logs of a container. Params: {field_names(LogArgs)}'),
+        ('restart', f'Restart a container. Params: {field_names(RestartArgs)}'),
+    )
+    application.job_queue.run_once(set_commands, 1, data=commands, name='set-commands')
     application.run_polling()
