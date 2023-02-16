@@ -95,11 +95,13 @@ class ArgsHandler(CommandHandler):
 def reply_fabric(message, text) -> str:       
     now = datetime.now(timezone.utc).isoformat(sep=' ', timespec='seconds')
     
-    header = '_command_ ' + '`' + message.text + '`'
+    header = f'_command_ `{message.text}`'
+
     body = '\n\n'
     body += escape_markdown(text, version=2)
     body += '\n' if text.endswith('\n') else '\n\n'
-    footer = '_replied_ ' + '`' + now + '`'
+
+    footer = f'_replied_ `{now}`'
 
     reply = header + body + footer
     return reply
