@@ -148,11 +148,12 @@ async def restart_container(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             args: RestartArgs, docker_client):
     c = docker_client.containers.get(args.container_name)
     
-    c.restart(timeout=args.timeout)
-
-    reply = reply_fabric(update.message, 'restarted')
+    reply = reply_fabric(update.message, 'restarting...')
     await context.bot.send_message(chat_id=update.effective_chat.id, text=reply,
                                    parse_mode=ParseMode.MARKDOWN_V2)
+
+    # At the end to avoid cycling restarts
+    c.restart(timeout=args.timeout)
 
 
 async def set_commands(context):
@@ -182,5 +183,5 @@ if __name__ == '__main__':
         ('logs', f'Return logs of a container. Params: {field_names(LogArgs)}'),
         ('restart', f'Restart a container. Params: {field_names(RestartArgs)}'),
     )
-    application.job_queue.run_once(set_commands, 1, data=commands, name='set-commands')
+    application.job_queue.run_once(set_commands, 2, data=commands, name='set-commands')
     application.run_polling()
