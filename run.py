@@ -205,4 +205,4 @@ if __name__ == '__main__':
         DockerHandler('logs', get_container_logs, LogArgs, filters=filters.User(user_id=args.userid)),
         DockerHandler('restart', restart_container, RestartArgs, filters=filters.User(user_id=args.userid))
     ])
-    application.run_polling()
+    application.run_polling(allowed_updates=['message'], drop_pending_updates=True)
