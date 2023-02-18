@@ -2,9 +2,10 @@ import logging
 from dataclasses import dataclass, fields
 from argparse import ArgumentParser
 from datetime import datetime, timezone
+from functools import partial
 
 import docker
-from telegram import Update, BotCommand
+from telegram import Update, BotCommandScopeChat, BotCommandScopeDefault
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, filters
 from telegram.helpers import escape_markdown
 from telegram.constants import ParseMode
@@ -12,14 +13,14 @@ from telegram.constants import ParseMode
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
-as_logger = logging.getLogger('apscheduler')
-as_logger.setLevel(logging.WARNING)
+# as_logger = logging.getLogger('apscheduler')
+# as_logger.setLevel(logging.WARNING)
 field_names = lambda DC: ', '.join(f.name for f in fields(DC))
 
 
 class FileDataType:
 
-    def __init__(self, mode='r', type=str):
+    def __init__(self, type, mode='r'):
         self.mode = mode
         self.type = type
 
@@ -67,7 +68,7 @@ class EchoArgs:
     text: str = None
 
 
-class ArgsHandler(CommandHandler):
+class DockerHandler(CommandHandler):
 
     def __init__(self, command, callback, args_class, **kwargs):
         wrapped_cbk = self._wrapp_callback(command, callback, args_class)
@@ -92,10 +93,10 @@ class ArgsHandler(CommandHandler):
         return wrapped_callback
 
 
-def reply_fabric(message, text) -> str:       
+def reply_fabric(message_text, text) -> str:       
     now = datetime.now(timezone.utc).isoformat(sep=' ', timespec='seconds')
     
-    header = f'_command_ `{message.text}`'
+    header = f'_command_ `{message_text}`'
 
     body = '\n\n'
     body += escape_markdown(text, version=2)
@@ -107,19 +108,18 @@ def reply_fabric(message, text) -> str:
     return reply
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="Started")
-
-
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE, args: EchoArgs, docker_client):
-    reply = reply_fabric(update.message, 'echo' if args.text is None else args.text)
+    text = 'echo' if args.text is None else args.text
+    reply = reply_fabric(update.message.text, text)
     await context.bot.send_message(chat_id=update.effective_chat.id, text=reply,
                                    parse_mode=ParseMode.MARKDOWN_V2)
 
 
 async def user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    info = str(update.message.from_user)
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=info)
+    text = f'{update.effective_user} \n {update.effective_chat}'
+    reply = reply_fabric(update.message.text, text)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=reply,
+                                   parse_mode=ParseMode.MARKDOWN_V2)
 
 
 async def list_containers(update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -130,7 +130,7 @@ async def list_containers(update: Update, context: ContextTypes.DEFAULT_TYPE,
     for c in c_list:
         text += f'{c.name} {c.status}\n'
 
-    reply = reply_fabric(update.message, text)
+    reply = reply_fabric(update.message.text, text)
     await context.bot.send_message(chat_id=update.effective_chat.id, text=reply,
                                    parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -141,7 +141,7 @@ async def get_container_logs(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     logs = c.logs(tail=args.tail_number).decode()
     
-    reply = reply_fabric(update.message, logs)
+    reply = reply_fabric(update.message.text, logs)
     await context.bot.send_message(chat_id=update.effective_chat.id, text=reply,
                                    parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -150,40 +150,59 @@ async def restart_container(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             args: RestartArgs, docker_client):
     c = docker_client.containers.get(args.container_name)
     
-    reply = reply_fabric(update.message, 'restarting...')
+    reply = reply_fabric(update.message.text, 'restarting...')
     await context.bot.send_message(chat_id=update.effective_chat.id, text=reply,
                                    parse_mode=ParseMode.MARKDOWN_V2)
 
     # At the end to avoid cycling restarts
-    c.restart(timeout=args.timeout)
+    async def restart():
+        c.restart(timeout=args.timeout)
+        reply = reply_fabric(update.message.text, 'restarted.')
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=reply,
+                                       parse_mode=ParseMode.MARKDOWN_V2)
+    context.application.create_task(restart())
 
 
-async def set_commands(context):
-    await context.bot.set_my_commands(context.job.data)
-    cmd_names = ', '.join(c[0] for c in context.job.data)
-    logging.info('Commands have been set: %s', cmd_names)
+async def set_commands(commands_map, application):
+    for Scope, scope_data in commands_map.items():
+        scope = Scope() if not scope_data.get('args') else Scope(*scope_data['args'])
+        await application.bot.set_my_commands(scope_data['commands'], scope=scope)
+        cmd_names = ', '.join(c[0] for c in scope_data['commands'])
+        logging.info('Commands have been set: %s[%s]', Scope.__name__, cmd_names)
 
 
+async def send_healthcheck(chat_id):
+   pass 
+
+     
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument('token', type=FileDataType(), help='Absolute path to a text file with a bot token in.')
-    parser.add_argument('userid', type=FileDataType(type=int), help='Absolute path to a text file with an allowed user id number.')
+    parser.add_argument('token', type=FileDataType(str), help='Absolute path to a text file with a bot token in.')
+    parser.add_argument('userid', type=FileDataType(int), help='Absolute path to a text file with an allowed user id number.')
     args = parser.parse_args()
-    
-    application = ApplicationBuilder().token(args.token).build()
-    # application.add_handler(CommandHandler('start', start))
-    # application.add_handler(CommandHandler('info', user_info))
-    application.add_handlers([
-        ArgsHandler('echo', echo, EchoArgs, filters=filters.User(user_id=args.userid)),
-        ArgsHandler('list', list_containers, ListArgs, filters=filters.User(user_id=args.userid)),
-        ArgsHandler('logs', get_container_logs, LogArgs, filters=filters.User(user_id=args.userid)),
-        ArgsHandler('restart', restart_container, RestartArgs, filters=filters.User(user_id=args.userid))
-    ])
-    commands = (
+
+    pub_commands = (
+        ('info', 'User and chat information'),
+        )
+    priv_commands = pub_commands + (
         ('echo', f'Resend you typed text or echoing. Params: {field_names(EchoArgs)}'),
         ('list', f'List containers. Params: {field_names(ListArgs)}'),
         ('logs', f'Return logs of a container. Params: {field_names(LogArgs)}'),
         ('restart', f'Restart a container. Params: {field_names(RestartArgs)}'),
     )
-    application.job_queue.run_once(set_commands, 2, data=commands, name='set-commands')
+    commands_map = {
+        BotCommandScopeDefault: {'commands': pub_commands},
+        BotCommandScopeChat: {'commands': priv_commands,
+                              'args': (args.userid, )}
+    }
+    post_init = partial(set_commands, commands_map)
+    application = ApplicationBuilder().token(args.token).post_init(post_init).build()
+
+    application.add_handler(CommandHandler('info', user_info))
+    application.add_handlers([
+        DockerHandler('echo', echo, EchoArgs, filters=filters.User(user_id=args.userid)),
+        DockerHandler('list', list_containers, ListArgs, filters=filters.User(user_id=args.userid)),
+        DockerHandler('logs', get_container_logs, LogArgs, filters=filters.User(user_id=args.userid)),
+        DockerHandler('restart', restart_container, RestartArgs, filters=filters.User(user_id=args.userid))
+    ])
     application.run_polling()
