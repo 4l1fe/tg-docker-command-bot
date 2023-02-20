@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from functools import partial
 
 import docker
-from telegram import Update, BotCommandScopeChat, BotCommandScopeDefault
+from telegram import Update, BotCommandScopeChat, BotCommandScopeDefault, BotCommand
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, filters
 from telegram.helpers import escape_markdown
 from telegram.constants import ParseMode
@@ -166,8 +166,10 @@ async def restart_container(update: Update, context: ContextTypes.DEFAULT_TYPE,
 async def set_commands(commands_map, application):
     for Scope, scope_data in commands_map.items():
         scope = Scope() if not scope_data.get('args') else Scope(*scope_data['args'])
+
         await application.bot.set_my_commands(scope_data['commands'], scope=scope)
-        cmd_names = ', '.join(c[0] for c in scope_data['commands'])
+
+        cmd_names = ', '.join(bc.command for bc in scope_data['commands'])
         logging.info('Commands have been set: %s[%s]', Scope.__name__, cmd_names)
 
 
@@ -181,14 +183,21 @@ if __name__ == '__main__':
     parser.add_argument('userid', type=FileDataType(int), help='Absolute path to a text file with an allowed user id number.')
     args = parser.parse_args()
 
+    info_cmd = BotCommand('info', 'User and chat information')
+    echo_cmd = BotCommand('echo', f'Resend you typed text or echoing. Params: {field_names(EchoArgs)}')
+    list_cmd = BotCommand('list', f'List containers. Params: {field_names(ListArgs)}')
+    logs_cmd = BotCommand('logs', f'Return logs of a container. Params: {field_names(LogArgs)}')
+    restart_cmd = BotCommand('restart', f'Restart a container. Params: {field_names(RestartArgs)}')
+
     pub_commands = (
-        ('info', 'User and chat information'),
-        )
+        info_cmd,
+    )
     priv_commands = pub_commands + (
-        ('echo', f'Resend you typed text or echoing. Params: {field_names(EchoArgs)}'),
-        ('list', f'List containers. Params: {field_names(ListArgs)}'),
-        ('logs', f'Return logs of a container. Params: {field_names(LogArgs)}'),
-        ('restart', f'Restart a container. Params: {field_names(RestartArgs)}'),
+        info_cmd,
+        echo_cmd,
+        list_cmd,
+        logs_cmd,
+        restart_cmd
     )
     commands_map = {
         BotCommandScopeDefault: {'commands': pub_commands},
@@ -198,11 +207,11 @@ if __name__ == '__main__':
     post_init = partial(set_commands, commands_map)
     application = ApplicationBuilder().token(args.token).post_init(post_init).build()
 
-    application.add_handler(CommandHandler('info', user_info))
     application.add_handlers([
-        DockerHandler('echo', echo, EchoArgs, filters=filters.User(user_id=args.userid)),
-        DockerHandler('list', list_containers, ListArgs, filters=filters.User(user_id=args.userid)),
-        DockerHandler('logs', get_container_logs, LogArgs, filters=filters.User(user_id=args.userid)),
-        DockerHandler('restart', restart_container, RestartArgs, filters=filters.User(user_id=args.userid))
+        CommandHandler(info_cmd.command, user_info),
+        DockerHandler(echo_cmd.command, echo, EchoArgs, filters=filters.User(user_id=args.userid)),
+        DockerHandler(list_cmd.command, list_containers, ListArgs, filters=filters.User(user_id=args.userid)),
+        DockerHandler(logs_cmd.command, get_container_logs, LogArgs, filters=filters.User(user_id=args.userid)),
+        DockerHandler(restart_cmd.command, restart_container, RestartArgs, filters=filters.User(user_id=args.userid))
     ])
     application.run_polling(allowed_updates=['message'], drop_pending_updates=True)
