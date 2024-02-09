@@ -246,16 +246,13 @@ async def start_container(update: Update, context: ContextTypes.DEFAULT_TYPE, ar
     await context.bot.send_message(chat_id=update.effective_chat.id, text=reply, parse_mode=ParseMode.MARKDOWN_V2)
 
 
-async def set_commands(commands_map: dict, application: Application):
-    for Scope, scope_data in commands_map.items():
-        scope = Scope() \
-                if not scope_data.get('args') \
-                else Scope(*scope_data['args'])  # set `chat_id`
+async def set_commands(scope: BotCommandScopeDefault | BotCommandScopeChat,
+                       commands: list[BotCommand],
+                       application: Application):
+    await application.bot.set_my_commands(commands, scope=scope)
 
-        await application.bot.set_my_commands(scope_data['commands'], scope=scope)
-
-        cmd_names = ', '.join(bc.command for bc in scope_data['commands'])
-        logging.info('Commands have been set: %s[%s]', Scope.__name__, cmd_names)
+    cmd_names = ', '.join(bc.command for bc in commands)
+    logging.info('Commands have been set: %s[%s]', scope.__name__, cmd_names)
 
      
 if __name__ == '__main__':
@@ -264,15 +261,10 @@ if __name__ == '__main__':
     parser.add_argument('user_id', type=FileSecretType(int), help='Absolute path to a text file with an allowed user id number.')
     args = parser.parse_args()
 
-    commands_map = {
-        BotCommandScopeDefault: {'commands': SCOPES[BotCommandScopeDefault]},
-        BotCommandScopeChat: {'commands': list(chain.from_iterable(SCOPES.values())),
-                              'args': (args.user_id, )}
-    }
-    _set_commands = partial(set_commands, commands_map)
     application = ApplicationBuilder() \
                   .token(args.token) \
-                  .post_init(_set_commands) \
+                  .post_init(partial(set_commands, SCOPES[BotCommandScopeDefault], BotCommandScopeDefault())) \
+                  .post_init(partial(set_commands, SCOPES[BotCommandScopeChat], BotCommandScopeChat(args.user_id))) \
                   .build()
 
     # Make all the Docker handlers private
