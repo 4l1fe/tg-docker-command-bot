@@ -3,11 +3,13 @@ from itertools import chain
 from dataclasses import dataclass, fields
 from argparse import ArgumentParser
 from datetime import datetime, timezone
-from functools import partial, wraps
+from functools import wraps
 from collections import defaultdict
 from contextvars import ContextVar
 
-import docker
+
+import inject
+from docker import from_env, DockerClient
 from telegram import Update, BotCommandScopeChat, BotCommandScopeDefault, BotCommand
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, filters, Application
 from telegram.helpers import escape_markdown
@@ -71,7 +73,7 @@ class EchoArgs:
     text: str = None
 
 
-class DockerHandler(CommandHandler):
+class ArgsHandler(CommandHandler):
 
     def __init__(self, command, callback, args_class, **kwargs):
         wrapped_cbk = self._wrapp_callback(command, callback, args_class)
@@ -90,8 +92,7 @@ class DockerHandler(CommandHandler):
                 await context.bot.send_message(chat_id=update.effective_chat.id, text=error)
                 return
 
-            docker_client = docker.from_env()
-            return await callback(update, context, cbk_args, docker_client)
+            return await callback(update, context, cbk_args)
 
         return wrapped_callback
 
@@ -141,10 +142,10 @@ def reg_handler(handler_class):
     return decorator
 
 
-def reply_fabric(message_text, text) -> str:
+def reply_fabric(command, text) -> str:
     now = datetime.now(timezone.utc).isoformat(sep=' ', timespec='seconds')
     
-    header = f'_command_ `{message_text}`'
+    header = f'_command_ `{command}`'
 
     body = '\n\n'
     body += escape_markdown(text, version=2)
@@ -166,8 +167,9 @@ async def user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     
 @reg_command('echo', 'Resend you typed text or echoing.', args=EchoArgs)
-@reg_handler(DockerHandler)
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE, args: EchoArgs, docker_client):
+@reg_handler(ArgsHandler)
+@inject.autoparams()
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE, args: EchoArgs, docker_client: DockerClient):
     text = 'echo' if args.text is None else args.text
     reply = reply_fabric(update.message.text, text)
     await context.bot.send_message(chat_id=update.effective_chat.id, text=reply,
@@ -175,8 +177,9 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE, args: EchoArg
 
 
 @reg_command('list', 'List containers.', args=ListArgs)
-@reg_handler(DockerHandler)
-async def list_containers(update: Update, context: ContextTypes.DEFAULT_TYPE, args: ListArgs, docker_client):
+@reg_handler(ArgsHandler)
+@inject.autoparams()
+async def list_containers(update: Update, context: ContextTypes.DEFAULT_TYPE, args: ListArgs, docker_client: DockerClient):
     c_list = docker_client.containers.list(all=args.all, limit=args.limit)
 
     text = ''
@@ -189,8 +192,9 @@ async def list_containers(update: Update, context: ContextTypes.DEFAULT_TYPE, ar
 
 
 @reg_command('logs', 'Return logs of a container.', args=LogArgs)
-@reg_handler(DockerHandler)
-async def get_container_logs(update: Update, context: ContextTypes.DEFAULT_TYPE, args: LogArgs, docker_client):
+@reg_handler(ArgsHandler)
+@inject.autoparams()
+async def get_container_logs(update: Update, context: ContextTypes.DEFAULT_TYPE, args: LogArgs, docker_client: DockerClient):
     c = docker_client.containers.get(args.container_name)
 
     logs = c.logs(tail=args.tail_number).decode()
@@ -201,8 +205,9 @@ async def get_container_logs(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 
 @reg_command('restart', 'Restart a container.', args=StartStopArgs)
-@reg_handler(DockerHandler)
-async def restart_container(update: Update, context: ContextTypes.DEFAULT_TYPE, args: StartStopArgs, docker_client):
+@reg_handler(ArgsHandler)
+@inject.autoparams()
+async def restart_container(update: Update, context: ContextTypes.DEFAULT_TYPE, args: StartStopArgs, docker_client: DockerClient):
     c = docker_client.containers.get(args.container_name)
     
     reply = reply_fabric(update.message.text, 'restarting...')
@@ -219,8 +224,9 @@ async def restart_container(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 
 @reg_command('stop', 'Stop a container.', args=StartStopArgs)
-@reg_handler(DockerHandler)
-async def stop_container(update: Update, context: ContextTypes.DEFAULT_TYPE, args: StartStopArgs, docker_client):
+@reg_handler(ArgsHandler)
+@inject.autoparams()
+async def stop_container(update: Update, context: ContextTypes.DEFAULT_TYPE, args: StartStopArgs, docker_client: DockerClient):
     c = docker_client.containers.get(args.container_name)
 
     reply = reply_fabric(update.message.text, 'stopping...')
@@ -237,8 +243,9 @@ async def stop_container(update: Update, context: ContextTypes.DEFAULT_TYPE, arg
 
 
 @reg_command('start', 'Star a stopped container.', args=StartStopArgs)
-@reg_handler(DockerHandler)
-async def start_container(update: Update, context: ContextTypes.DEFAULT_TYPE, args: StartStopArgs, docker_client):
+@reg_handler(ArgsHandler)
+@inject.autoparams()
+async def start_container(update: Update, context: ContextTypes.DEFAULT_TYPE, args: StartStopArgs, docker_client: DockerClient):
     c = docker_client.containers.get(args.container_name)
 
     c.start()
@@ -252,24 +259,37 @@ async def set_commands(scope: BotCommandScopeDefault | BotCommandScopeChat,
     await application.bot.set_my_commands(commands, scope=scope)
 
     cmd_names = ', '.join(bc.command for bc in commands)
-    logging.info('Commands have been set: %s[%s]', scope.__name__, cmd_names)
+    logging.info('Commands have been set: %s[%s]', scope.__class__.__name__, cmd_names)
 
      
+async def error_handler(update: Update, context):
+        logging.exception('Undefined error')
+        
+        reply = reply_fabric(update.message.text, str(context.error))
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=reply, parse_mode=ParseMode.MARKDOWN_V2)
+
+
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('token', type=FileSecretType(str), help='Absolute path to a text file with a bot token in.')
     parser.add_argument('user_id', type=FileSecretType(int), help='Absolute path to a text file with an allowed user id number.')
     args = parser.parse_args()
 
+    inject.configure(lambda binder: binder.bind_to_provider(DockerClient, from_env))    
+    
+    async def set_commands_init(application: Application):
+        await set_commands(BotCommandScopeDefault(), SCOPES[BotCommandScopeDefault], application)
+        await set_commands(BotCommandScopeChat(args.user_id), SCOPES[BotCommandScopeChat], application)
+        
     application = ApplicationBuilder() \
                   .token(args.token) \
-                  .post_init(partial(set_commands, SCOPES[BotCommandScopeDefault], BotCommandScopeDefault())) \
-                  .post_init(partial(set_commands, SCOPES[BotCommandScopeChat], BotCommandScopeChat(args.user_id))) \
+                  .post_init(set_commands_init) \
                   .build()
+    application.add_error_handler(error_handler)
 
     # Make all the Docker handlers private
-    for handler in HANDLERS[DockerHandler]:
-        handler: DockerHandler
+    for handler in HANDLERS[ArgsHandler]:
+        handler: ArgsHandler
         handler.filters = filters.User(user_id=args.user_id)
         
     handlers = list(chain.from_iterable(HANDLERS.values()))
